@@ -1,12 +1,11 @@
-
 # -*- coding: utf-8 -*-
 """
-Plane Battle - Pygbag Web Edition
 @author: Lyon
 """
 
 import asyncio
 import random
+import sys
 import pygame
 from pygame.locals import *
 from gameRole import *
@@ -15,6 +14,9 @@ from gameRole import *
 BLUE = (0, 0, 255)
 BLACK = (0, 0, 0)
 WHITE = (230, 240, 255)
+
+# Gameplay tuning
+ENEMY_SPAWN_INTERVAL = 30
 
 pygame.mixer.pre_init(
     frequency=44100,
@@ -50,14 +52,40 @@ try:
 except (pygame.error, FileNotFoundError):
     pass
 
-# Images
-background = pygame.image.load(
-    "resources/image/background.png"
-).convert()
 
-game_over_img = pygame.image.load(
-    "resources/image/gameover.png"
-).convert_alpha()
+def play_sound(sound):
+    if sound is not None:
+        sound.play()
+
+
+def music_pause():
+    try:
+        pygame.mixer.music.pause()
+    except pygame.error:
+        pass
+
+
+def music_resume():
+    try:
+        pygame.mixer.music.unpause()
+    except pygame.error:
+        pass
+
+
+# Images
+def fit_to_screen(image):
+    """Scale an image to the screen size if it is not already that size."""
+    if image.get_size() != (SCREEN_WIDTH, SCREEN_HEIGHT):
+        return pygame.transform.smoothscale(image, (SCREEN_WIDTH, SCREEN_HEIGHT))
+    return image
+
+background = fit_to_screen(
+    pygame.image.load("resources/image/background.png").convert()
+)
+
+game_over_img = fit_to_screen(
+    pygame.image.load("resources/image/gameover.png").convert_alpha()
+)
 
 plane_img = pygame.image.load(
     "resources/image/shoot.png"
@@ -77,15 +105,47 @@ enemy1_down_imgs = [
     plane_img.subsurface(pygame.Rect(930, 697, 57, 43)).copy(),
 ]
 
+# Fonts
 score_font = pygame.font.Font(None, 36)
 final_font = pygame.font.Font(None, 48)
 button_font = pygame.font.Font(None, 40)
+small_font = pygame.font.Font(None, 30)
+title_font = pygame.font.Font(None, 110)
+hint_font = pygame.font.Font(None, 28)
 
-button_rect = pygame.Rect(0, 0, 200, 56)
-button_rect.center = (
-    SCREEN_WIDTH // 2,
-    SCREEN_HEIGHT // 2 + 110
-)
+CX = SCREEN_WIDTH // 2
+CY = SCREEN_HEIGHT // 2
+
+
+def make_button(center_x, center_y, width=210, height=56):
+    rect = pygame.Rect(0, 0, width, height)
+    rect.center = (center_x, center_y)
+    return rect
+
+
+# HUD pause button (top-right corner)
+pause_button_rect = pygame.Rect(SCREEN_WIDTH - 120, 10, 110, 40)
+
+# Pause menu buttons
+resume_button_rect = make_button(CX, CY + 20, 240)
+pause_quit_button_rect = make_button(CX, CY + 100, 240)
+
+# Game over buttons (side by side)
+play_again_button_rect = make_button(CX - 120, CY + 110)
+quit_button_rect = make_button(CX + 120, CY + 110)
+
+
+def draw_button(rect, label, hovered, font=None):
+    """Draw a themed button; colors invert on hover."""
+    font = font or button_font
+    fill = BLUE if hovered else BLACK
+    text_color = BLACK if hovered else WHITE
+
+    pygame.draw.rect(screen, fill, rect, border_radius=8)
+    pygame.draw.rect(screen, BLUE, rect, 3, border_radius=8)
+
+    text = font.render(label, True, text_color)
+    screen.blit(text, text.get_rect(center=rect.center))
 
 
 def create_player():
@@ -98,15 +158,58 @@ def create_player():
         pygame.Rect(432, 624, 102, 126),
     ]
 
-    return Player(plane_img, player_rects, [200, 600])
+    # Start at the bottom center of the screen
+    start_pos = [(SCREEN_WIDTH - 102) // 2, SCREEN_HEIGHT - 126 - 20]
+    return Player(plane_img, player_rects, start_pos)
 
 
-def play_sound(sound):
-    if sound is not None:
-        sound.play()
+async def pause_menu():
+    """Pause overlay. Returns True to resume, False to quit."""
+    music_pause()
+
+    snapshot = screen.copy()
+    dim = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.SRCALPHA)
+    dim.fill((0, 0, 0, 175))
+
+    title = title_font.render("PAUSED", True, BLUE)
+    title_rect = title.get_rect(center=(CX, CY - 80))
+    hint = hint_font.render("Press P or Esc to resume", True, WHITE)
+    hint_rect = hint.get_rect(center=(CX, CY + 175))
+
+    while True:
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                return False
+
+            if event.type == pygame.KEYDOWN and event.key in (K_p, K_ESCAPE):
+                music_resume()
+                return True
+
+            if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                if resume_button_rect.collidepoint(event.pos):
+                    music_resume()
+                    return True
+                if pause_quit_button_rect.collidepoint(event.pos):
+                    return False
+
+        mouse = pygame.mouse.get_pos()
+
+        screen.blit(snapshot, (0, 0))
+        screen.blit(dim, (0, 0))
+        screen.blit(title, title_rect)
+        draw_button(resume_button_rect, "Resume", resume_button_rect.collidepoint(mouse))
+        draw_button(pause_quit_button_rect, "Quit", pause_quit_button_rect.collidepoint(mouse))
+        screen.blit(hint, hint_rect)
+
+        pygame.display.flip()
+        clock.tick(30)
+
+        # Essential for Pygbag
+        await asyncio.sleep(0)
 
 
 async def run_game():
+    """Play one round. Returns the score, or None if the player quits."""
     player = create_player()
     enemies = pygame.sprite.Group()
     enemies_down = pygame.sprite.Group()
@@ -124,6 +227,19 @@ async def run_game():
             if event.type == pygame.QUIT:
                 return None
 
+            wants_pause = (
+                (event.type == pygame.KEYDOWN and event.key in (K_p, K_ESCAPE))
+                or (
+                    event.type == pygame.MOUSEBUTTONDOWN
+                    and event.button == 1
+                    and pause_button_rect.collidepoint(event.pos)
+                )
+            )
+
+            if wants_pause:
+                if not await pause_menu():
+                    return None
+
         # Shooting
         if not player.is_hit:
             if shoot_frequency % 15 == 0:
@@ -133,7 +249,9 @@ async def run_game():
             shoot_frequency = (shoot_frequency + 1) % 15
 
         # Spawn enemies
-        if enemy_frequency % 50 == 0:
+        enemy_frequency += 1
+        if enemy_frequency >= ENEMY_SPAWN_INTERVAL:
+            enemy_frequency = 0
             enemy_pos = [
                 random.randint(0, SCREEN_WIDTH - enemy1_rect.width),
                 0
@@ -141,8 +259,6 @@ async def run_game():
             enemies.add(
                 Enemy(enemy1_img, enemy1_down_imgs, enemy_pos)
             )
-
-        enemy_frequency = (enemy_frequency + 1) % 100
 
         # Move bullets safely
         for bullet in list(player.bullets):
@@ -209,10 +325,16 @@ async def run_game():
         player.bullets.draw(screen)
         enemies.draw(screen)
 
+        # HUD
         score_text = score_font.render(
             f"Score: {score}", True, WHITE
         )
         screen.blit(score_text, (10, 10))
+        draw_button(
+            pause_button_rect, "Pause",
+            pause_button_rect.collidepoint(pygame.mouse.get_pos()),
+            small_font
+        )
 
         pygame.display.flip()
 
@@ -237,32 +359,16 @@ async def run_game():
     return score
 
 
-def draw_button(hovered):
-    fill = BLUE if hovered else BLACK
-    text_color = BLACK if hovered else WHITE
-
-    pygame.draw.rect(
-        screen, fill, button_rect, border_radius=8
-    )
-    pygame.draw.rect(
-        screen, BLUE, button_rect, 3, border_radius=8
-    )
-
-    label = button_font.render(
-        "Play Again", True, text_color
-    )
-    screen.blit(label, label.get_rect(center=button_rect.center))
-
-
 async def show_game_over(score):
+    """Game over screen. Returns True to play again, False to quit."""
     snapshot = screen.copy()
 
     score_text = final_font.render(
         f"Score: {score}", True, WHITE
     )
     score_rect = score_text.get_rect(
-        centerx=SCREEN_WIDTH // 2,
-        centery=SCREEN_HEIGHT // 2 + 24
+        centerx=CX,
+        centery=CY + 24
     )
 
     while True:
@@ -270,22 +376,31 @@ async def show_game_over(score):
             if event.type == pygame.QUIT:
                 return False
 
-            if event.type == pygame.MOUSEBUTTONDOWN:
-                if event.button == 1 and button_rect.collidepoint(event.pos):
+            if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                if play_again_button_rect.collidepoint(event.pos):
                     return True
+                if quit_button_rect.collidepoint(event.pos):
+                    return False
 
             if event.type == pygame.KEYDOWN:
-                if event.key in (
-                    K_RETURN, K_KP_ENTER, K_SPACE, K_r
-                ):
+                if event.key in (K_RETURN, K_KP_ENTER, K_SPACE, K_r):
                     return True
+                if event.key in (K_q, K_ESCAPE):
+                    return False
+
+        mouse = pygame.mouse.get_pos()
 
         screen.blit(snapshot, (0, 0))
         screen.blit(game_over_img, (0, 0))
         screen.blit(score_text, score_rect)
 
         draw_button(
-            button_rect.collidepoint(pygame.mouse.get_pos())
+            play_again_button_rect, "Play Again",
+            play_again_button_rect.collidepoint(mouse)
+        )
+        draw_button(
+            quit_button_rect, "Quit",
+            quit_button_rect.collidepoint(mouse)
         )
 
         pygame.display.flip()
@@ -293,6 +408,25 @@ async def show_game_over(score):
 
         # Essential for Pygbag
         await asyncio.sleep(0)
+
+
+async def goodbye_screen():
+    """In a browser the canvas cannot be closed, so show a final message."""
+    try:
+        pygame.mixer.music.stop()
+    except pygame.error:
+        pass
+
+    screen.fill(BLACK)
+    line1 = final_font.render("Thanks for playing!", True, BLUE)
+    line2 = hint_font.render("Refresh the page to play again.", True, WHITE)
+    screen.blit(line1, line1.get_rect(center=(CX, CY - 15)))
+    screen.blit(line2, line2.get_rect(center=(CX, CY + 25)))
+    pygame.display.flip()
+
+    while True:
+        pygame.event.pump()
+        await asyncio.sleep(0.1)
 
 
 async def main():
@@ -307,6 +441,10 @@ async def main():
 
             if not play_again:
                 break
+
+        # Quit: close the window on desktop, show a goodbye screen in the browser
+        if sys.platform == "emscripten":
+            await goodbye_screen()
     finally:
         pygame.quit()
 
